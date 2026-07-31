@@ -95,13 +95,17 @@ func ClientAuthMiddleware(authenticator *auth.ClientAuthenticator) func(http.Han
 	}
 }
 
-// SourceIPMiddleware extracts the client source IP from X-Forwarded-For or remote address.
-func SourceIPMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := extractSourceIP(r)
-		ctx := httputil.WithSourceIP(r.Context(), ip)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+// SourceIPMiddleware records the trustworthy client source IP in the request
+// context. X-Forwarded-For is only honored for peers in the trusted-proxy set;
+// see clientIP for the spoofing-resistant resolution rules.
+func SourceIPMiddleware(trusted *TrustedProxies) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := clientIP(r, trusted)
+			ctx := httputil.WithSourceIP(r.Context(), ip)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
 }
 
 func BodyLimitMiddleware(maxBytes int64) func(http.Handler) http.Handler {
@@ -125,26 +129,4 @@ func SecurityHeadersMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		next.ServeHTTP(w, r)
 	})
-}
-
-func extractSourceIP(r *http.Request) string {
-	xff := r.Header.Get("X-Forwarded-For")
-	if xff != "" {
-		parts := strings.SplitN(xff, ",", 2)
-		ip := strings.TrimSpace(parts[0])
-		if ip != "" {
-			return ip
-		}
-	}
-
-	addr := r.RemoteAddr
-	if idx := strings.LastIndex(addr, ":"); idx != -1 {
-		if addr[0] == '[' {
-			if bracketIdx := strings.Index(addr, "]"); bracketIdx != -1 {
-				return addr[1:bracketIdx]
-			}
-		}
-		return addr[:idx]
-	}
-	return addr
 }

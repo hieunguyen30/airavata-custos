@@ -53,4 +53,9 @@ var (
 		Help:    "Duration of database queries in seconds",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"query"})
+
+	RateLimitedRequestsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "signer_rate_limited_requests_total",
+		Help: "Total number of requests rejected because the client exceeded its rate limit",
+	})
 )

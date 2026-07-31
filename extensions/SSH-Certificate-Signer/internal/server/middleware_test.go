@@ -24,28 +24,46 @@ import (
 	"github.com/apache/airavata-custos/signer/internal/httputil"
 )
 
-func TestExtractSourceIP_XForwardedFor(t *testing.T) {
+func TestClientIP_UntrustedPeerIgnoresXFF(t *testing.T) {
+	// A direct client (peer not in the trusted set) cannot spoof its IP via
+	// X-Forwarded-For: the real peer address must win.
+	trusted, _ := ParseTrustedProxies(nil)
 	req := httptest.NewRequest("GET", "/", nil)
-	req.Header.Set("X-Forwarded-For", "10.1.2.3, 192.168.1.1")
-	ip := extractSourceIP(req)
-	if ip != "10.1.2.3" {
-		t.Errorf("expected 10.1.2.3, got %s", ip)
+	req.RemoteAddr = "203.0.113.9:5555"
+	req.Header.Set("X-Forwarded-For", "10.1.2.3")
+	ip := clientIP(req, trusted)
+	if ip != "203.0.113.9" {
+		t.Errorf("expected peer 203.0.113.9 (XFF ignored), got %s", ip)
 	}
 }
 
-func TestExtractSourceIP_RemoteAddr(t *testing.T) {
+func TestClientIP_TrustedProxyHonorsXFF(t *testing.T) {
+	// When the peer is a trusted proxy, the originating client from XFF wins.
+	trusted, _ := ParseTrustedProxies([]string{"192.168.0.0/16"})
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "192.168.1.1:5555"
+	req.Header.Set("X-Forwarded-For", "10.1.2.3, 192.168.1.1")
+	ip := clientIP(req, trusted)
+	if ip != "10.1.2.3" {
+		t.Errorf("expected client 10.1.2.3, got %s", ip)
+	}
+}
+
+func TestClientIP_RemoteAddr(t *testing.T) {
+	trusted, _ := ParseTrustedProxies(nil)
 	req := httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "192.168.1.100:12345"
-	ip := extractSourceIP(req)
+	ip := clientIP(req, trusted)
 	if ip != "192.168.1.100" {
 		t.Errorf("expected 192.168.1.100, got %s", ip)
 	}
 }
 
-func TestExtractSourceIP_IPv6(t *testing.T) {
+func TestClientIP_IPv6(t *testing.T) {
+	trusted, _ := ParseTrustedProxies(nil)
 	req := httptest.NewRequest("GET", "/", nil)
 	req.RemoteAddr = "[::1]:12345"
-	ip := extractSourceIP(req)
+	ip := clientIP(req, trusted)
 	if ip != "::1" {
 		t.Errorf("expected ::1, got %s", ip)
 	}
@@ -108,12 +126,15 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 
 func TestSourceIPMiddleware(t *testing.T) {
 	var extractedIP string
-	handler := SourceIPMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	trusted, _ := ParseTrustedProxies([]string{"192.0.2.0/24"})
+	handler := SourceIPMiddleware(trusted)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		extractedIP = httputil.SourceIPFromContext(r.Context())
 		w.WriteHeader(http.StatusOK)
 	}))
 
+	// Request arrives via a trusted proxy, so the XFF client IP is recorded.
 	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "192.0.2.10:4444"
 	req.Header.Set("X-Forwarded-For", "1.2.3.4")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)

@@ -16,7 +16,10 @@
 package server
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -45,23 +48,50 @@ func NewRouter(
 ) *chi.Mux {
 	r := chi.NewRouter()
 
+	trusted, err := ParseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		// Malformed entries are dropped, not fatal: the unparseable proxy is
+		// simply never trusted. Log so operators can fix the config.
+		slog.Warn("trusted_proxies contained invalid entries", "error", err)
+	}
+
+	// A single limiter is shared across every authenticated endpoint so a
+	// client's budget covers all of its requests, not one bucket per route.
+	var rateLimiter *RateLimiter
+	if cfg.RateLimit.Enabled {
+		ttl := time.Duration(cfg.RateLimit.CleanupIntervalSeconds) * time.Second
+		if ttl <= 0 {
+			ttl = 5 * time.Minute
+		}
+		rateLimiter = NewRateLimiter(cfg.RateLimit.RequestsPerSecond, cfg.RateLimit.Burst, ttl)
+		rateLimiter.StartReaper(context.Background(), ttl)
+		slog.Info("per-client rate limiting enabled",
+			"requests_per_second", cfg.RateLimit.RequestsPerSecond,
+			"burst", cfg.RateLimit.Burst)
+	}
+
 	if cfg.CORS.Enabled {
 		r.Use(CORSMiddleware(cfg.CORS))
 	}
 	r.Use(SecurityHeadersMiddleware)
-	r.Use(SourceIPMiddleware)
+	r.Use(SourceIPMiddleware(trusted))
 	r.Use(BodyLimitMiddleware(1 << 20)) // 1 MB
 
-	// Health endpoint (no auth)
+	// Health endpoint (no auth, exempt from rate limiting for load-balancer probes)
 	r.Get("/api/v1/health", handlers.Health)
 
-	// Metrics endpoint (no auth)
+	// Metrics endpoint (no auth, exempt from rate limiting)
 	if cfg.Metrics.Enabled {
 		r.Handle(cfg.Metrics.Path, promhttp.Handler())
 	}
 
-	// Client-authenticated routes (machine-to-machine)
+	// Client-authenticated routes (machine-to-machine).
+	// Rate limiting runs before authentication so floods are rejected before
+	// any credential lookup or cryptographic work.
 	r.Group(func(r chi.Router) {
+		if rateLimiter != nil {
+			r.Use(rateLimiter.Middleware)
+		}
 		r.Use(ClientAuthMiddleware(authenticator))
 
 		r.Post("/api/v1/sign", handlers.Sign)
@@ -73,6 +103,9 @@ func NewRouter(
 
 	// User-authenticated routes (OIDC Bearer token)
 	r.Group(func(r chi.Router) {
+		if rateLimiter != nil {
+			r.Use(rateLimiter.Middleware)
+		}
 		r.Use(BearerAuthMiddleware(oidcValidator))
 
 		r.Get("/api/v1/certificates", handlers.Certificates)

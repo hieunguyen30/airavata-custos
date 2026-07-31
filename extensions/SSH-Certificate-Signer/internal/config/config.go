@@ -25,14 +25,34 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Database DatabaseConfig `yaml:"database"`
-	Vault    VaultConfig    `yaml:"vault"`
-	Signer   SignerConfig   `yaml:"signer"`
-	DevMode  DevModeConfig  `yaml:"dev_mode"`
-	Logging  LoggingConfig  `yaml:"logging"`
-	Metrics  MetricsConfig  `yaml:"metrics"`
-	CORS     CORSConfig     `yaml:"cors"`
+	Server   ServerConfig    `yaml:"server"`
+	Database DatabaseConfig  `yaml:"database"`
+	Vault    VaultConfig     `yaml:"vault"`
+	Signer   SignerConfig    `yaml:"signer"`
+	DevMode  DevModeConfig   `yaml:"dev_mode"`
+	Logging  LoggingConfig   `yaml:"logging"`
+	Metrics  MetricsConfig   `yaml:"metrics"`
+	CORS     CORSConfig      `yaml:"cors"`
+	RateLimit RateLimitConfig `yaml:"rate_limit"`
+
+	// TrustedProxies is the set of CIDR ranges (or bare IPs) whose
+	// X-Forwarded-For header is trusted. Requests from any other peer have
+	// their XFF ignored and are attributed to the peer's real address, so a
+	// client cannot spoof its source IP to poison audit logs or evade
+	// per-client rate limits. Empty means no proxy is trusted (XFF ignored).
+	TrustedProxies []string `yaml:"trusted_proxies"`
+}
+
+// RateLimitConfig controls per-client (per source IP) request throttling.
+// The limiter is a token bucket: RequestsPerSecond is the steady refill rate
+// and Burst is the maximum number of requests that may arrive at once before
+// throttling kicks in. Idle buckets are evicted after CleanupIntervalSeconds
+// of inactivity so memory stays bounded regardless of client cardinality.
+type RateLimitConfig struct {
+	Enabled                bool    `yaml:"enabled"`
+	RequestsPerSecond      float64 `yaml:"requests_per_second"`
+	Burst                  int     `yaml:"burst"`
+	CleanupIntervalSeconds int     `yaml:"cleanup_interval_seconds"`
 }
 
 // DevModeConfig disables OIDC token validation and returns a default identity
@@ -184,6 +204,13 @@ func DefaultConfig() *Config {
 			Enabled: true,
 			Path:    "/metrics",
 		},
+		RateLimit: RateLimitConfig{
+			Enabled:                true,
+			RequestsPerSecond:      50,
+			Burst:                  100,
+			CleanupIntervalSeconds: 300,
+		},
+		TrustedProxies: []string{},
 	}
 }
 
@@ -248,5 +275,29 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		cfg.Logging.Level = v
+	}
+	if v := os.Getenv("RATE_LIMIT_ENABLED"); v != "" {
+		cfg.RateLimit.Enabled = strings.EqualFold(v, "true")
+	}
+	if v := os.Getenv("RATE_LIMIT_RPS"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			cfg.RateLimit.RequestsPerSecond = f
+		}
+	}
+	if v := os.Getenv("RATE_LIMIT_BURST"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.RateLimit.Burst = n
+		}
+	}
+	if v := os.Getenv("TRUSTED_PROXIES"); v != "" {
+		proxies := strings.Split(v, ",")
+		trimmed := make([]string, 0, len(proxies))
+		for _, p := range proxies {
+			s := strings.TrimSpace(p)
+			if s != "" {
+				trimmed = append(trimmed, s)
+			}
+		}
+		cfg.TrustedProxies = trimmed
 	}
 }

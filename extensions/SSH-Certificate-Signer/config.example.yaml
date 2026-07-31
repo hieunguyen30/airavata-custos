@@ -77,3 +77,15 @@ logging:
 metrics:
   enabled: true
   path: /metrics
+
+rate_limit:
+  enabled: true                          # env: RATE_LIMIT_ENABLED — per-client (per source IP) throttling
+  requests_per_second: 50                # env: RATE_LIMIT_RPS — sustained token refill rate per client
+  burst: 100                             # env: RATE_LIMIT_BURST — max requests allowed at once before throttling
+  cleanup_interval_seconds: 300          # evict idle per-client buckets after this long, keeping memory bounded
+
+# CIDR ranges (or bare IPs) whose X-Forwarded-For header is trusted. Requests
+# from any other peer have their XFF ignored and are attributed to the real
+# peer address, preventing source-IP spoofing in audit logs and rate limiting.
+# Set this to your load balancer / reverse proxy addresses. Empty = trust none.
+trusted_proxies: []                      # env: TRUSTED_PROXIES (comma-separated)
